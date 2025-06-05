@@ -38,7 +38,7 @@ Below is the step-by-step sequence of the course, guiding you through the proces
 
 
 ## Vegetation index (VI) using
-#### Matias et al. (2020) and colaborators developed an package call FieldImageR, the package present a lot of usefull information that were combined to the actual code. One of the interest point are the vegetation index, FieldImageR is able to calcular several VI (See below):
+#### Matias et al. (2020) and colaborators developed a package call FieldImageR, the package present a lot of usefull information that were combined to the actual code. One of the interest point are the vegetation index, FieldImageR is able to calcular several VI (See below):
 ![image](https://github.com/user-attachments/assets/ff3c86ef-a732-4f09-8d9f-fd78b28b1b08)
 
 * Source: https://doi.org/10.1002/ppj2.20005 (See the paper and some explanations)
