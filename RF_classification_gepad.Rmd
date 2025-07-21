@@ -1,0 +1,919 @@
+---
+title: "Soil Removal amd Image Analysis"
+author: "Thiago Orlando Costa Barboza"
+date: "2025-06-05"
+output: pdf_document
+---
+
+# 1° - Install packages and clone github
+
+```{r}
+
+#1° install the packages:
+install.packages(c('terra','mapview','sf','stars','caret','mapedit','devtools',"dplyr",
+                   "fields","leafem","leafsync","lwgeom","BiocManager","git2r","exactextractr","rgdal", "xgboost",
+                   "nnet", "caret", "e1071","pliman", "Rtools","randomForest", "kernelab"))
+
+#2° install the dependency for FieldImageR:
+BiocManager::install("EBImage")
+
+#3° install FIELDimageR and FieldImageR.extra:
+devtools::install_github("OpenDroneMap/FIELDimageR")
+devtools::install_github("filipematias23/FIELDimageR.Extra")
+```
+
+# 2° - Call libraries
+
+```{r}
+
+library(webshot)
+library(webshot2)
+library(tinytex)
+library(rmarkdown)
+library(raster)
+library(FIELDimageR)
+library(FIELDimageR.Extra)
+library(terra)
+library(mapview)
+library(sf)
+library(stars)
+library(nlme)
+library(imager)
+library(leafsync)
+library(pliman)
+library(gdalUtilities)
+library(ggplot2)
+library(gridExtra)
+library(RStoolbox)
+library(patchwork)
+library(tidyr)
+library(caret)
+library(e1071)    
+library(xgboost)    
+library(nnet)
+library(dplyr)
+library(viridis)
+library(randomForest)
+library(kernlab)
+```
+
+# 3° - Call the multispectral bands or ortomosaic
+
+```{r, insert the path for each bands or the orthomosaic image}
+
+banda_r <- rast("C:/Users/THIAGO/Desktop/projeto_trainee_gepad/01_ortomosaico/processing_transparent_reflectance_red.tif") 
+
+banda_g <- rast("C:/Users/THIAGO/Desktop/projeto_trainee_gepad/01_ortomosaico/processing_transparent_reflectance_green.tif")  
+
+#When you're using the mavic you don't have the blue band
+banda_b <- rast("C:/Users/THIAGO/Desktop/projeto_trainee_gepad/01_ortomosaico/processing_transparent_reflectance_green.tif")  
+
+banda_re <- rast("C:/Users/THIAGO/Desktop/projeto_trainee_gepad/01_ortomosaico/processing_transparent_reflectance_red edge.tif")  
+
+banda_nir <- rast("C:/Users/THIAGO/Desktop/projeto_trainee_gepad/01_ortomosaico/processing_transparent_reflectance_nir.tif")  
+
+# the 1° option you're jointing the bands in one file (bandset)
+bandset <- c(banda_r, banda_g, banda_b, banda_re, banda_nir)
+```
+
+#3.1° - Call directly the ortomosaic
+
+```{r, insert the path for orthomosaic}
+
+#the 2° option: you can also use only the orthomosaic/reflectance map, if you already join the bands in one file
+
+bandset <-rast("C:/Users/Thiago/Downloads/OneDrive_2025-07-20 (1)/processing/3_dsm_ortho/2_mosaic/processing_mosaic_group1.tif")
+
+#print the informations
+print(bandset)
+```
+# 3.2° - Open the images using PlotRGB 
+
+```{r, Open the bandset (orthomosaic)}
+
+# Function to open the bandset
+plotRGB(bandset, r = 1, g = 2, b = 3) #8 bits 0 - 255
+
+#16 bits 0 - 65535 convert to 0 - 255
+plotRGB(bandset, r = 1, g = 2, b = 5, stretch = "lin")
+
+# if you need to save the bandset, use this option
+writeRaster(bandset, "C:/Users/THIAGO/Desktop/projeto_trainee_gepad/01_ortomosaico/bandset.tif", overwrite = TRUE)
+
+```
+# 3.3° - Find the location to clip the image
+
+```{r, open the image in webshot}
+
+#open the save orthomosaic again
+bandset <- rast("C:/Users/THIAGO/Desktop/projeto_trainee_gepad/01_ortomosaico/bandset.tif")
+
+#Call the shape and find the locations to clip
+shp <- read_sf("C:/Users/THIAGO/Desktop/projeto_trainee_gepad/02_tratamentos/IH_2024_USDA_plt_analysis.geojson")
+
+#this function you can see your raster image
+fieldView(bandset, shp)
+
+```
+
+# 3.4° - Clip the images usig AOI
+
+```{r, clip the orthomosaic and open}
+
+#if you need to clip the raster image use the AOI below
+#editor equal TRUE open the editor
+aoi<-fieldView(bandset,editor = TRUE) 
+
+#here you can put your polygon if you draw in the QGIS, ARCgis, etc.
+#aoi <- st_read('C:/Users/THIAGO COSTA/OneDrive/Área de Trabalho/amrinder/poligono.shp') 
+
+#clip the bandset in the interest field
+bandset_1 <- crop(bandset, aoi) 
+bandset_1
+#Open the clipped bandset
+fieldView(bandset_1) #plot the bandset
+```
+
+# 4° - Calculate the Vegetation Index for classification (option)
+
+```{r,index calculation}
+
+#for the classification you can calculate a index (NDVI) to improve the classification
+#pass the information of the sequence of the banset that you used in the 'c()'
+#using the function 'myindex' you can add manually your index
+indices <- fieldIndex(bandset_1, 
+                      Red = 1, 
+                      Green = 2, 
+                      Blue = 3, 
+                      RedEdge = 4, 
+                      NIR = 5,
+                      index = c("SCI", "NDRE", "NDVI")) 
+
+fieldView(bandset_1)
+#fieldView(indices$NIR)
+```
+
+# 5° - Creating the samples
+
+```{r, creating the soil and plant samples for classification}
+#create the soil and plant samples
+# Digitize soil object by drawing polygons at least 5-6 large polygon uniformly distributed
+#generate random 400 points for soil class
+orto <- bandset_1
+soil<-fieldView(mosaic = orto, editor = TRUE)
+soil<-st_as_sf(st_sample(soil, 400))
+soil$class<-'soil'
+
+# Digitize plants object by drawing polygons 
+#The number of polygon will depends upon the number of training points to be generated
+#generate random 400 points for plants class
+plants<-fieldView(mosaic = orto, editor = TRUE)
+plants<-st_as_sf(st_sample(plants, 400))
+plants$class<-'plants'
+
+#You also can add more class like forest, water, etc.
+
+#joining all class in one file
+training_sam<-rbind(soil,plants)
+```
+
+# 5.1° - Plotting and visualing the points
+
+```{r, visualizing the poitn generated}
+
+#Add the orthomosaic and the points generate to visualize
+#you also can add the vegetation index
+fieldView(bandset_1, plants)
+
+```
+
+#6.0° Using the mainly function to run the classification
+
+```{r}
+run_classification_models <- function(
+  raster_data,
+  training_data,
+  models = c("rf", "svmRadial", "xgbTree"),
+  response_col = "class",
+  tune_length = 3,
+  kfold = 5,
+  train_partition = 0.7,
+  min_dist = 0,
+  plot_results = TRUE
+) {
+  # Garantir nomes únicos
+  names(raster_data) <- make.unique(names(raster_data))
+
+  # Converter para Spatial se necessário
+  if (!inherits(training_data, "Spatial")) {
+    training_data <- as(training_data, "Spatial")
+  }
+
+  # Armazenar resultados
+  results <- list()
+
+  for (model in models) {
+    message(paste("Treinando modelo:", model))
+    
+    model_result <- superClass(
+      raster_data,
+      trainData = training_data,
+      responseCol = response_col,
+      model = model,
+      tuneLength = tune_length,
+      kfold = kfold,
+      trainPartition = train_partition,
+      minDist = min_dist
+    )
+    
+    # Nome do objeto no padrão result_MODEL
+    result_name <- paste0("result_", toupper(gsub("^(.)", "\\U\\1", model, perl = TRUE)))
+    
+    if (plot_results) {
+      plot(model_result$map, main = paste("Mapa classificado -", model))
+      fieldView(raster_data, model_result$map)
+      print(model_result$validation$performance)
+    }
+    
+    results[[result_name]] <- model_result
+  }
+
+  return(results)
+}
+
+band_result <- run_classification_models(raster_data = bandset_1, training_data = training_sam)
+
+```
+
+# 6.1° - Set the parameters for ML models
+
+```{r, training the RF model}
+
+#Creating the file for ortomosaic
+ortomosaico = bandset_1
+
+#Make unique raster
+names(ortomosaico) <- make.unique(names(ortomosaico))
+
+#Creating some samples
+samples = as(training_sam, "Spatial")
+
+```
+
+
+# 6°.2 - Training Random Forest (RF)
+
+```{r, training the RF model}
+#training the RF model using the samples
+result_RF = superClass(
+ ortomosaico, 
+ trainData = samples,
+ responseCol = "class",
+ model = "rf",
+ tuneLength = 3,
+ kfold = 5,
+ trainPartition = 0.7,
+ minDist = 0
+)
+
+#plot the classify map
+plot(result_RF$map)
+fieldView(bandset_1, result_RF$map)
+
+#plot the model performance on validation
+print(result_RF$validation$performance)
+```
+
+# 6.3° - Training Support Vector Machine (SVM)
+
+```{r}
+
+# Training the SVM model using the samples
+result_SVM <- superClass(
+  ortomosaico, 
+  trainData = samples,
+  responseCol = "class",
+  model = "svmRadial",  # Use SVM with radial basis function kernel
+  tuneLength = 3,       # Number of parameter combinations to try
+  kfold = 5,            # 5-fold cross-validation
+  trainPartition = 0.7,  # 70% training, 30% validation
+  minDist = 0
+)
+
+# Plot the classified map
+plot(result_SVM$map)
+fieldView(bandset_1, result_SVM$map)
+
+# Print the model performance on validation
+print(result_SVM$validation$performance)
+```
+
+# 6.4° - Training Xgboosting (XGB)
+
+```{r}
+
+# Training the XGBoost model using the samples
+result_XGB <- superClass(
+  ortomosaico, 
+  trainData = samples,
+  responseCol = "class",
+  model = "xgbTree",    # Use XGBoost model
+  tuneLength = 3,       # Number of parameter combinations to try
+  kfold = 5,            # 5-fold cross-validation
+  trainPartition = 0.7,  # 70% training, 30% validation
+  minDist = 0
+)
+
+# Plot the classified map
+plot(result_XGB$map)
+fieldView(bandset_1, result_XGB$map)
+
+# Print the model performance on validation
+print(result_XGB$validation$performance)
+```
+
+# 6.4° - Comparing models performance
+
+
+```{r}
+
+# Helper function to convert raster to dataframe
+raster_to_df <- function(raster_obj, value_name = "value") {
+  df <- as.data.frame(raster_obj, xy = TRUE, na.rm = FALSE)
+  if (ncol(df) == 3) {
+    names(df)[3] <- value_name
+  }
+  return(df)
+}
+
+# Helper function to plot the raster dataframe
+plot_raster_df <- function(df, value_col, title) {
+  ggplot(df, aes(x = x, y = y, fill = as.factor(.data[[value_col]]))) +
+    geom_raster() +
+    scale_fill_viridis_d() +
+    coord_equal() +
+    labs(title = title, fill = "Class") +
+    theme_bw()
+}
+
+# Main function
+plot_and_save_results <- function(result_list) {
+  # Ask user for save directory
+  save_dir <- readline(prompt = "Enter the directory to save the maps (e.g., C:/path/to/save): ")
+  if (!dir.exists(save_dir)) {
+    stop("Directory does not exist. Please create it or check the path.")
+  }
+  
+  # Extract results from the list
+  results_named <- list(
+    RF = result_list$result_RF,
+    SVM = result_list$result_SVMRADIAL,
+    XGB = result_list$result_XGBTREE
+  )
+
+  plots <- list()
+  plot_dfs <- list()
+  
+  for (model_name in names(results_named)) {
+    result <- results_named[[model_name]]
+    df <- raster_to_df(result$map, value_name = model_name)
+    plot <- plot_raster_df(df, model_name, paste(model_name, "Classification"))
+    
+    # Save each individual plot
+    plot_path <- file.path(save_dir, paste0("plot_", model_name, ".png"))
+    ggsave(plot_path, plot, height = 6, width = 8, dpi = 600)
+    
+    plots[[model_name]] <- plot
+    plot_dfs[[model_name]] <- df
+  }
+  
+  # Combine plots using patchwork
+  combined_plot <- plots$RF + plots$SVM + plots$XGB + plot_layout(nrow = 2, ncol = 2)
+  
+  # Save combined plot
+  combined_path <- file.path(save_dir, "combined_plot.png")
+  ggsave(combined_path, combined_plot, height = 10, width = 12, dpi = 600)
+  
+  message("All plots saved successfully in: ", save_dir)
+  return(combined_plot)  # Optionally return the combined plot
+}
+
+
+combined_plot <- plot_and_save_results(results)
+
+```
+
+#6.4.1° Comparing the models using the manual method
+
+```{r}
+
+# Function to convert the dataframes
+raster_to_df <- function(raster_obj, value_name = "value") {
+  # Converte para data.frame com coordenadas (x, y)
+  df <- as.data.frame(raster_obj, xy = TRUE, na.rm = FALSE)
+  
+  # Renomeia a coluna de valores para algo mais descritivo
+  if (ncol(df) == 3) {
+    names(df)[3] <- value_name
+  }
+  
+  return(df)
+}
+
+# Function to plot using ggplot
+plot_raster_df <- function(df, value_col, title) {
+  ggplot(df, aes(x = x, y = y, fill = as.factor(.data[[value_col]]))) +
+    geom_raster() +
+    scale_fill_viridis_d()+
+    #scale_fill_gradient(low = "green", high = "orange") +
+    coord_equal() +
+    labs(title = title, fill = "Class") +
+    theme_bw()
+}
+
+# Convert the dataframes and coordinates
+RF_data <- raster_to_df(result_RF$map, value_name = "RF")
+SVM_data <- raster_to_df(result_SVM$map, value_name = "SVM")
+XGB_data <- raster_to_df(result_XGB$map, value_name = "XGB")
+
+# Run for each model
+plot_RF <- plot_raster_df(RF_data, "RF", "Random Forest Classification")
+plot_SVM <- plot_raster_df(SVM_data, "SVM", "SVM Classification")
+plot_XGB <- plot_raster_df(XGB_data, "XGB", "XGBoost Classification")
+
+#show the plots
+print(plot_RF)
+print(plot_SVM)
+print(plot_XGB)
+
+#Combine the  plots
+combined_plot <- plot_RF + plot_SVM + plot_XGB + plot_layout(nrow = 2, ncol = 2)  
+combined_plot
+
+#save the plots
+ggsave("C:/Users/THIAGO/Desktop/projeto_trainee_gepad/04_resultados/01_combined_plots.png", 
+       combined_plot,
+       height = 10,
+       width = 12,
+       dpi = 600)
+
+```
+
+# 6.5° - Plot the metrics
+
+```{r}
+plot_and_save_metrics <- function(result_list) {
+  # Ask user for directory
+  save_dir <- readline(prompt = "Enter the directory to save the metrics plot (e.g., C:/path/to/save): ")
+  if (!dir.exists(save_dir)) {
+    stop("Directory does not exist. Please create it or check the path.")
+  }
+  
+  # Extract model names and their results
+  model_names <- c("RF", "SVM", "XGB")
+  model_keys <- c("result_RF", "result_SVMRADIAL", "result_XGBTREE")
+  
+  # Initialize metrics dataframe
+  performance_df <- data.frame(Modelo = character(), Accuracy = numeric(), Kappa = numeric(),
+                               Sensitivity = numeric(), Specificity = numeric(),
+                               Pos_Pred_Value = numeric(), Neg_Pred_Value = numeric(),
+                               stringsAsFactors = FALSE)
+  
+  for (i in seq_along(model_keys)) {
+    model <- model_names[i]
+    result <- result_list[[model_keys[i]]]
+    
+    performance_df <- rbind(performance_df, data.frame(
+      Modelo = model,
+      Accuracy = result$validation$performance$overall["Accuracy"],
+      Kappa = result$validation$performance$overall["Kappa"],
+      Sensitivity = result$validation$performance$byClass["Sensitivity"],
+      Specificity = result$validation$performance$byClass["Specificity"],
+      Pos_Pred_Value = result$validation$performance$byClass["Pos Pred Value"],
+      Neg_Pred_Value = result$validation$performance$byClass["Neg Pred Value"]
+    ))
+  }
+  
+  print(performance_df)
+  
+  # Convert to long format for ggplot
+  performance_long <- performance_df %>%
+    pivot_longer(cols = -Modelo, names_to = "Métrica", values_to = "Valor")
+  
+  # Plot the metrics
+  metric_plot <- ggplot(performance_long, aes(x = Modelo, y = Valor, fill = Modelo)) +
+    geom_bar(stat = "identity", position = "dodge") +
+    facet_wrap(~ Métrica, scales = "free_y") +
+    scale_fill_viridis_d(option = "D", begin = 0.2, end = 0.8) +
+    labs(
+      #title = "Comparing the models performance",
+      x = "Model",
+      y = "Value"
+    ) +
+    theme_bw(base_size = 14) +
+    theme(legend.position = "none")
+  
+  # Save the plot
+  metrics_path <- file.path(save_dir, "metrics_models.png")
+  ggsave(metrics_path, metric_plot, height = 6, width = 8, dpi = 600)
+  
+  message("Metrics plot saved successfully in: ", save_dir)
+  return(metric_plot)
+}
+
+metrics_plot <- plot_and_save_metrics(results)
+```
+#6.5.1° - Creating the dataframe manually for each model
+
+```{r}
+# Creating a dataframe for metrics
+performance_df <- data.frame(
+  Modelo = c("RF", "SVM", "XGB"),
+  Accuracy = c(
+    result_RF$validation$performance$overall["Accuracy"],
+    result_SVM$validation$performance$overall["Accuracy"],
+    result_XGB$validation$performance$overall["Accuracy"]
+  ),
+  Kappa = c(
+    result_RF$validation$performance$overall["Kappa"],
+    result_SVM$validation$performance$overall["Kappa"],
+    result_XGB$validation$performance$overall["Kappa"]
+  ),
+  Sensitivity = c(
+    result_RF$validation$performance$byClass["Sensitivity"],
+    result_SVM$validation$performance$byClass["Sensitivity"],
+    result_XGB$validation$performance$byClass["Sensitivity"]
+  ),
+  Specificity = c(
+    result_RF$validation$performance$byClass["Specificity"],
+    result_SVM$validation$performance$byClass["Specificity"],
+    result_XGB$validation$performance$byClass["Specificity"]
+  ),
+  Pos_Pred_Value = c(
+    result_RF$validation$performance$byClass["Pos Pred Value"],
+    result_SVM$validation$performance$byClass["Pos Pred Value"],
+    result_XGB$validation$performance$byClass["Pos Pred Value"]
+  ),
+  Neg_Pred_Value = c(
+    result_RF$validation$performance$byClass["Neg Pred Value"],
+    result_SVM$validation$performance$byClass["Neg Pred Value"],
+    result_XGB$validation$performance$byClass["Neg Pred Value"]
+  )
+)
+
+print(performance_df)
+
+# Converting the dataframe
+performance_long <- performance_df %>%
+  pivot_longer(cols = -Modelo, names_to = "Métrica", values_to = "Valor")
+
+# Ploting the dataframe
+p1 <- ggplot(performance_long, aes(x = Modelo, y = Valor, fill = Modelo)) +
+  geom_bar(stat = "identity", position = "dodge") +
+  facet_wrap(~ Métrica, scales = "free_y") +  # Um gráfico por métrica
+  scale_fill_viridis_d(option = "D", begin = 0.2, end = 0.8) +
+  labs(
+    title = "Comparing the models performance",
+    x = "Model",
+    y = "Value"
+  ) +
+  theme_bw(base_size = 14) +
+  theme(legend.position = "none")
+p1
+
+ggsave("C:/Users/THIAGO/Desktop/projeto_trainee_gepad/04_resultados/02_metrics_models.png",
+       p1,
+       height = 6,
+       width = 8,
+       dpi = 600)
+```
+
+# 6.6° - Confusion Matrix
+
+```{r}
+# Helper: Plot a single confusion matrix
+plot_confusion_matrix <- function(model_result, model_name = "Modelo") {
+  conf_mat <- model_result$validation$performance$table
+  if (is.null(conf_mat)) stop("Confusion matrix not found for: ", model_name)
+  
+  conf_df <- as.data.frame(as.table(conf_mat))
+  colnames(conf_df) <- c("Prediction", "Reference", "Count")
+  
+  ggplot(conf_df, aes(x = Reference, y = Prediction, fill = Count)) +
+    geom_tile(color = "white") +
+        geom_label(aes(label = Count),
+               fill = "white",           # Background color
+               color = "black",          # Text color
+               size = 5,                 # Text size
+               label.size = 0.3,         # Border thickness
+               label.r = unit(0.15, "lines")  # Rounded corners
+    ) +
+    #geom_text(aes(label = Count), color = "black", size = 6) +
+    scale_fill_viridis(option = "D", direction = -1) +
+    labs(
+      title = paste("Confusion Matrix -", model_name),
+      x = "True Class",
+      y = "Predicted Class",
+      fill = "Count"
+    ) +
+    theme_bw(base_size = 14)
+}
+
+# Main function: process and save all confusion matrix plots
+plot_and_save_confusion_matrix <- function(result_list) {
+  # Ask user for save path
+  save_dir <- readline(prompt = "Enter the directory to save the confusion matrices (e.g., C:/path/to/save): ")
+  if (!dir.exists(save_dir)) stop("Directory does not exist.")
+  
+  # Model names and keys
+  model_names <- c("Random Forest", "SVM Radial", "XGBoost")
+  model_keys <- c("result_RF", "result_SVMRADIAL", "result_XGBTREE")
+  
+  # Store plots
+  matrix_plots <- list()
+  
+  for (i in seq_along(model_keys)) {
+    key <- model_keys[i]
+    name <- model_names[i]
+    
+    p <- plot_confusion_matrix(result_list[[key]], name)
+    matrix_plots[[name]] <- p
+    
+    # Save each individual matrix
+    ggsave(
+      filename = file.path(save_dir, paste0("confusion_matrix_", gsub(" ", "_", name), ".png")),
+      plot = p,
+      height = 6, width = 6, dpi = 600
+    )
+  }
+  
+  # Combine all matrices
+  combined_plot <- matrix_plots[[1]] + matrix_plots[[2]] + matrix_plots[[3]] + plot_layout(nrow = 2, ncol = 2)
+  
+  # Save combined
+  ggsave(
+    filename = file.path(save_dir, "confusion_matrix_combined.png"),
+    plot = combined_plot,
+    height = 10, width = 12, dpi = 600
+  )
+  
+  message("Confusion matrices saved in: ", save_dir)
+  return(combined_plot)
+}
+
+conf_matrix_plot <- plot_and_save_confusion_matrix(results)
+```
+
+#6.6.1° - Creating the confusion matrix manually
+
+```{r}
+
+# Função para extrair e plotar matriz de confusão como heatmap
+plot_confusion_matrix <- function(model_result, model_name = "Modelo") {
+  # Extrai matriz de confusão
+  conf_mat <- model_result$validation$performance$table
+  
+  # Verifica se a matriz existe
+  if (is.null(conf_mat)) {
+    stop("Confusion matrix not found in the model")
+  }
+  
+  # Transforma em data frame para ggplot
+  conf_df <- as.data.frame(as.table(conf_mat))
+  colnames(conf_df) <- c("Prediction", "Reference", "Count")
+  
+  # Plot
+  p <- ggplot(conf_df, aes(x = Reference, y = Prediction, fill = Count)) +
+    geom_tile(color = "white") +
+    geom_text(aes(label = Count), color = "black", size = 6) +
+    scale_fill_viridis(option = "D", direction = -1) +
+    labs(
+      title = paste("Confusion Matrix -", model_name),
+      x = "Real Class (Reference)",
+      y = "Predict Class (Prediction)",
+      fill = "Counting"
+    ) +
+    theme_bw(base_size = 14)
+  
+  print(p)
+  return(p)
+}
+
+# Exemplo de uso para seus resultados:
+mx_RF <- plot_confusion_matrix(result_RF, "Random Forest")
+mx_SVM <- plot_confusion_matrix(result_SVM, "SVM Radial")
+mx_XGB <- plot_confusion_matrix(result_XGB, "XGBoost")
+
+#Combine the matrix
+joing <- mx_RF + mx_SVM + mx_XGB + plot_layout(nrow = 2, ncol = 2)
+joing
+#Save the results
+ggsave("C:/Users/THIAGO/Desktop/projeto_trainee_gepad/04_resultados/03_confusion_matrix.png",
+       joing,
+       height = 10,
+       width = 12,
+       dpi = 600)
+```
+
+# 7° - Clip the original dataset
+
+```{r, clip the original bandset and save the new map}
+
+#creating a mask and remove the soil
+soilmask = result_RF$map == 1
+ortosolo = mask(bandset_1, soilmask, maskvalue = 0)
+plot(ortosolo[[1]])
+
+#Analyzing the clip resulting
+fieldView(bandset_1, ortosolo[[1]])
+
+# Converter para dataframe plotável
+df_solo <- as.data.frame(ortosolo[[1]], xy = TRUE, na.rm = TRUE)
+
+# Criar e salvar o gráfico
+plot <- ggplot(df_solo, aes(x = x, y = y, fill = names(df_solo)[3])) +
+  geom_raster() +
+  scale_fill_viridis_d(name = "Valor") +
+  labs(color = "Plants")+
+  labs(title = "Remove soil map") +
+  theme_bw() + 
+  theme(legend.position = "Top")
+plot
+
+#save the map
+ggsave("C:/Users/THIAGO/Desktop/projeto_trainee_gepad/04_resultados/04_soil_remove_ortho.png", 
+       plot, 
+       width = 8, 
+       height = 8, 
+       dpi = 600)
+
+```
+
+# 7.1° - Save the original image
+
+```{r, save the raster image}
+#save the orginal image with soil clip
+writeRaster(raster(ortosolo), 
+            filename = "C:/Users/THIAGO/Desktop/projeto_trainee_gepad/04_resultados/05_class_orto.tif", 
+            format = "GTiff")
+```
+
+
+# 8° - Creating the plots to extract
+
+```{r}
+#creating the information
+test_shape <- fieldShape_render(mosaic = ortosolo, 
+                                ncols = 3, 
+                                nrows = 8,
+                                buffer = -1)
+
+#Open the created polygon
+fieldView(mosaic = ortosolo,
+          fieldShape = test_shape,
+          type = 2,
+          alpha = 0.2)
+```
+
+
+# 8.1° - Loading the plots and creating a buffer
+
+```{r, loading the plots to extract the values}
+
+#loading the plots
+plots <- st_read("C:/Users/THIAGO/Desktop/projeto_trainee_gepad/02_tratamentos/IH_2024_USDA_plt_analysis.geojson")
+
+#if you need you can change the coordinate system
+#plots <- plots %>%
+ # st_transform(crs = 4326)
+
+
+#Check the coordinate system
+print(ortosolo)
+print(plots)
+plot(plots)
+
+#Apply the buffer for the plots
+plots <- st_buffer(plots, dist = -3)
+
+#plot the results of the classification with the plots
+fieldView(ortosolo,
+          fieldShape = plots,
+          type = 2,
+          alpha_grid = 0.2)
+```
+
+# 9° - Calculate the VI using Pliman
+
+```{r, calculate some vegetation index}
+
+#Calculate the index again without soil
+resultados <- mosaic_index(
+  ortosolo, 
+  index = c("NDVI", "GLI", "NDRE", "GNDVI", "MSAVI"), 
+  r = 1, 
+  g = 2, 
+  b = 3 , 
+  re = 4, 
+  nir = 5
+)
+
+plot(resultados$NDRE)
+```
+
+# 9.1° - Save the Vegetation Index
+
+```{r, save the vegetation index}
+
+#if you want to save the raster images use the function below
+writeRaster(raster(resultados$NDVI), filename = "C:/Users/THIAGO/Desktop/projeto_trainee_gepad/04_resultados/06_NDVI.tif", format = "GTiff")
+writeRaster(raster(resultados$GNDVI), filename = "C:/Users/THIAGO/Desktop/projeto_trainee_gepad/04_resultados/07_GNDVI.tif", format = "GTiff")
+writeRaster(raster(resultados$NDRE), filename = "C:/Users/THIAGO/Desktop/projeto_trainee_gepad/04_resultados/08_NDRE.tif", format = "GTiff")
+writeRaster(raster(resultados$MSAVI), filename = "C:/Users/THIAGO/Desktop/projeto_trainee_gepad/04_resultados/09_MSAVI.tif", format = "GTiff")
+
+```
+
+# 10° - Extracting the mean values for each plot and save
+
+```{r, extracting the mean values and save}
+
+#extract the values using the mean
+DataTotal<- fieldInfo_extra(
+  mosaic = resultados,
+  fieldShape = plots, 
+  fun = "mean") #extracting the data
+
+DataTotal
+
+#if you want to save the csv file 
+write.csv(DataTotal, "C:/Users/THIAGO/Desktop/projeto_trainee_gepad/04_resultados/10_data_total.csv", row.names = TRUE)
+```
+
+
+# 11° - Plot an individual VI
+
+```{r, plotting the classify map using ggplot}
+
+#Convert the raster in a dataframe
+df_mosaic <- as.data.frame(resultados, xy = TRUE)
+
+#plotting the map using the ggplot function
+p1<- ggplot(df_mosaic, aes(x = x, y = y, fill = NDVI)) +
+  geom_raster() +
+  scale_fill_viridis_c(name = "NDVI") +
+  labs(title = "Vegetation Index Map") +
+  theme_bw() +
+  theme(legend.position = "bottom")
+p1
+```
+
+# 11.1° - Creating a dataframe and plotting the results
+
+```{r, plot all VI}
+
+VI_analysis <- function(df, value_col, title) {
+  ggplot(df, aes(x = x, y = y, fill = .data[[value_col]])) +
+    geom_raster() +
+    scale_fill_viridis_c(name = value_col)+
+    #scale_fill_gradient(low = "green", high = "orange") +
+    coord_equal() +
+    #labs(title = title, fill = "Class") +
+    theme_bw()
+}
+
+# Column names
+col <- colnames(df_mosaic)[c(-1, -2)]
+
+# Create a list to store plots
+plots <- list()
+
+# Create individual boxplots
+for (column_name in col) {
+  plot <- VI_analysis(
+    df = df_mosaic,
+    value_col = column_name,
+    title = column_name)
+  
+  plots[[column_name]] <- plot
+  
+      # Save each plot with the column name as the filename
+  ggsave(
+    filename = paste0('C:/Users/THIAGO/Desktop/projeto_trainee_gepad/04_resultados/',
+                      column_name, '.png'), 
+    plot = plot, width = 5, height = 5
+  )
+}
+
+plots
+
+VI <- wrap_plots(plots, ncol = 2, nrow =3)
+VI
+
+#save the file
+ggsave("C:/Users/THIAGO/Desktop/projeto_trainee_gepad/04_resultados/11_VI_map.png", 
+       VI, 
+       width = 12, 
+       height = 10, 
+       dpi = 600)
+```
+
