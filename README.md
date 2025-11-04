@@ -12,29 +12,28 @@ Below is the step-by-step sequence of the course, guiding you through the proces
 * 📦 1 - Install Packages: Install essential R packages for image processing and analysis.
 * 📚 2 - Load Libraries: Import the required R libraries for the workflow.
 * 🖼️ 3 - Import Multispectral Bands: Load individual multispectral bands separately.
-  * 🖼️ 3.1 - Import Orthomosaic: Directly load the orthomosaic image for analysis.
-  * 🖼️ 3.2 - Visualize Image: Display the image using PlotRGB for visual inspection.
-  * 📷 3.3 - Locate Treatments: Identify experimental plots within the image.
-  * 📍 3.4 - Crop Area of Interest: Extract the region of interest (ROI) from the orthomosaic.
-* ✂️ 4 - Calculate Vegetation Indices (Optional): Compute indices like NDVI to enhance classification.
-* 🌿 5 - Create Soil and Plant Samples: Generate training samples for soil and vegetation classification.
-  * 🌱 5.1 - Visualize Samples: Inspect the generated soil and plant samples.
-* 👀 6 - Prepare Data for Classification: Configure samples and image for model training.
-  * 🛠️ 6.1 - Classify with Random Forest (RF): Use Random Forest for classification.
-  * 🧠 6.2 - Classify with Support Vector Machine (SVM): Use SVM for classification.
-  * 🧠 6.3 - Classify with XGBoost (XGB): Use XGBoost for classification.
-  * 📈  6.4 - Visualize and Save Classifications: Display model outputs and save classified rasters.
-  * 📉 6.5 - Evaluate Model Metrics: Assess performance metrics (e.g., accuracy, Kappa) for each model.
-  * 📊 6.6 - Visualize Confusion Matrix: Plot confusion matrices to evaluate classification performance.
-* 🌾 7 - Remove Soil with Mask: Crop the orthomosaic using the plant mask to remove soil.
-  * 💾 7.1 - Save Cropped Image: Export the soil-removed raster as a new file.
-* 🚜 8 - Create Treatments with FieldImageR: Generate experimental treatments using FieldImageR.
-  * 🗺️ 8.1 - Load Treatments and Create Buffer: Import plot data and create buffers for analysis.
-* 🌿 9 - Calculate Indices with Pliman: Compute vegetation indices using the pliman package.
-  * 💾 9.1 - Save Vegetation Indices: Export calculated indices to a file.
-* 📊 10 - Extract Mean Values per Treatment: Calculate average index values for each plot.
-* 📈 11 - Create Dataframe and Visualize: Convert raster data to a dataframe and plot vegetation indices.
+* 🌿 4 - Create Soil and Plant Samples: Generate training samples for soil and vegetation classification.
+* 🛠️ 5 - Running three ML models: RF, SVMradial and XGBtree
+* 💾 6 - Save the classified map
+* 📉 7 - Analyzing the models metrics and confusion matrix
+* 🌾 8 - Removing the soil background
+* 🚜 9 - Call the treatments, transform the coordinates and applying the buffer
+* 🧠 10 - Calculate the VI following (pliman package)
+* 📊 11 - Extract the mean values and save (.xlsx)
+* 📈 12 - Plotting the boxplot to compare the treatments
 
+
+## Pay attention
+The code was write under Rstudio using the Rmarkdown and R version 4.4.3
+Before starting to use the code make sure you have the Rtools ---> https://cran.r-project.org/bin/windows/Rtools/rtools43/rtools.html
+You need to download the same version used for R, i.e. in my case since I'm using the R 4.4.3 I needed to download the Rtools 4.3.
+
+## Observation
+The code has extra comments about the operations and functions used. However in some cases the functions can be confuse. For example:
+  * 1 if you are working on Pix4D software you gonna have the multispectral bands separate, thus you can import each one and join the bands in Rstudio.
+  * 2 Creating samples is wide tool and you can create more samples than "soil" and "plants"
+  * 3 Running ML models accept only three models SVM, XGB and RF or you can Run only one model
+  * 4 When you call your plots or treatments, previous prepared in QGIS (for example), you need to check the coordinates system and also transform the ortosolo (soil background removed ortomosaic). Nevertheless, if you processed the images using the metashape you should know you need to transform the 16bit values for 0 - 1 normalized values for reflectance otherwise your VI showed wired values. Look at the metashape tutorial ---> https://agisoft.freshdesk.com/support/solutions/articles/31000148780-micasense-rededge-mx-processing-workflow-including-reflectance-calibration-in-agisoft-metashape-pro
 
 
 ## Vegetation index (VI) using
