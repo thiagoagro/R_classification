@@ -1,4 +1,4 @@
-# 🌍 Drone Image Processing Course: Soil Removal with R 🚁
+# 🌍 Drone Image Processing: Soil Removal with R 🚁
 
 ## Welcome to the Drone Image Processing! 📸
 ✨ This repository contains all the code and resources for learning how to process drone-captured images and remove soil using the power of R! 
