@@ -85,11 +85,11 @@ fieldView(bandset_1, shp)
 
 ```{r}
 #create the soil and plant samples
-# Digitize soil object by drawing polygons at least 5-6 large polygon uniformly distributed
+# Find soil object by drawing polygons at least 5-6 large polygon uniformly distributed
 #generate random 400 points for soil class
 orto <- bandset_1
 soil<-fieldView(mosaic = orto, editor = TRUE)
-soil<-st_as_sf(st_sample(soil, 400))
+soil<-st_as_sf(st_sample(soil, 400)) #you can change this value
 soil$class<-'soil'
 
 # Digitize plants object by drawing polygons 
@@ -1236,4 +1236,5 @@ combined_plot <- wrap_plots(plots, ncol = 4, nrow = 6)
 combined_plot
 
 ggsave(filename = '~/Canola/test/VI/combined.png', combined_plot, width = 12, height = 18)
+
 ```
