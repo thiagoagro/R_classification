@@ -33,7 +33,7 @@ The code has extra comments about the operations and functions used. However in 
   * 1 if you are working on Pix4D software you gonna have the multispectral bands separate, thus you can import each one and join the bands in Rstudio.
   * 2 Creating samples is wide tool and you can create more samples than "soil" and "plants"
   * 3 Running ML models accept only three models SVM, XGB and RF or you can Run only one model
-  * 4 When you call your plots or treatments, previous prepared in QGIS (for example), you need to check the coordinates system and also transform the ortosolo (soil background removed ortomosaic). Nevertheless, if you processed the images using the metashape you should know you need to transform the 16bit values for 0 - 1 normalized values for reflectance otherwise your VI showed wired values. Look at the metashape tutorial ---> https://agisoft.freshdesk.com/support/solutions/articles/31000148780-micasense-rededge-mx-processing-workflow-including-reflectance-calibration-in-agisoft-metashape-pro
+  * 4 When you call your plots or treatments, previous prepared in QGIS (for example), you need to check the coordinates system and also transform the ortosolo (soil background removed ortomosaic). Nevertheless, if you processed the images using the metashape you must know you need to transform the 16bit values for 0 - 1 normalized values for reflectance, otherwise your VI showed wired values. Look at the metashape tutorial ---> https://agisoft.freshdesk.com/support/solutions/articles/31000148780-micasense-rededge-mx-processing-workflow-including-reflectance-calibration-in-agisoft-metashape-pro
 
 
 ## Vegetation index (VI) using
