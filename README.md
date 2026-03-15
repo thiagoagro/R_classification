@@ -20,7 +20,6 @@ Below is the step-by-step sequence of the course, guiding you through the proces
 * 🚜 9 - Call the treatments, transform the coordinates and applying the buffer
 * 🧠 10 - Calculate the VI following (pliman package)
 * 📊 11 - Extract the mean values and save (.xlsx)
-* 📈 12 - Plotting the boxplot to compare the treatments
 
 
 ## Pay attention
