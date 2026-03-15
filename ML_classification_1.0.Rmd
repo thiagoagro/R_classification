@@ -1,0 +1,1197 @@
+---
+title: "ML Classification"
+author: "Thiago Orlando Costa Barboza"
+date: "2025-11-03"
+output:
+  pdf_document: default
+  html_document: default
+---
+
+
+# 1° - Install packages and clone github
+
+```{r}
+
+#1° install the packages:
+install.packages(c('terra','mapview','sf','stars','caret','mapedit','devtools',"dplyr",
+                   "fields","leafem","leafsync","lwgeom","BiocManager","git2r","exactextractr","rgdal", "xgboost",
+                   "nnet", "caret", "e1071","pliman", "Rtools","randomForest", "kernelab"))
+
+#2° install the dependency for FieldImageR:
+BiocManager::install("EBImage")
+
+#3° install FIELDimageR and FieldImageR.extra:
+devtools::install_github("OpenDroneMap/FIELDimageR")
+devtools::install_github("filipematias23/FIELDimageR.Extra")
+```
+
+# 2° - Call libraries
+
+```{r}
+
+library(webshot)
+library(webshot2)
+library(tinytex)
+library(rmarkdown)
+library(raster)
+library(FIELDimageR)
+library(FIELDimageR.Extra)
+library(terra)
+library(mapview)
+library(sf)
+library(stars)
+library(nlme)
+library(imager)
+library(leafsync)
+library(pliman)
+library(gdalUtilities)
+library(ggplot2)
+library(gridExtra)
+library(RStoolbox)
+library(patchwork)
+library(tidyr)
+library(caret)
+library(e1071)    
+library(xgboost)    
+library(nnet)
+library(dplyr)
+library(viridis)
+library(randomForest)
+library(kernlab)
+library(terra)
+library(sf)
+library(caret)
+library(mapview)
+library(exactextractr)
+```
+
+# 3° - Find the location to clip the image
+
+Since we are working on multispectral ou RGB images UAV's took the pictures with certain overlap outside of the area of interest, following that what we need to do is adjust and clip the field in the correct. Clip the image using a polygon is a simple operation, but sometimes we need to make sure that the coordinate system is correct, otherwise the process will not gonna work. Let's take a look in the first fucntion, where you can pass your polygon and multispectral image and the function automatic identify the coordinate system.
+
+Why Divide MicaSense Imagery by 32768?
+
+When a MicaSense camera captures an image, the sensor does not directly measure reflectance — it measures electromagnetic energy converted into raw integer values known as Digital Numbers (DN). These
+raw values are influenced by solar irradiance, illumination angle, camera exposure, and sensor temperature, meaning they cannot be directly compared across different dates or flight conditions. To address this, Metashape applies a radiometric calibration using a Calibrated Reflectance Panel (CRP) photographed before each flight, converting raw DNs into true surface reflectance — a physical property of the target that is independent of illumination conditions. After calibration, reflectance values would ideally be stored as floating-point numbers ranging from 0.0 to 1.0. However, Metashape stores the output as 16-bit unsigned integers (UInt16) for storage efficiency, as floating-point rasters roughly double the file size — a critical concern for large multispectral orthomosaics with five or more bands. To encode reflectance as integers, Metashape scales the values using 32768 (which equals 2¹⁵, the midpoint of the UInt16 range) as the reference for 100% reflectance. This means that dividing the stored DN by 32768 recovers the actual reflectance value. The midpoint was intentionally chosen over the maximum (65535) to preserve values above 100% reflectance, which are physically valid and expected for highly reflective surfaces such as white tarps, concrete roads, or specular water bodies. Clipping these values would compromise radiometric integrity. This normalization applies to all MicaSense sensors processed in Metashape with radiometric calibration enabled, including the RedEdge, RedEdge-MX, RedEdge-MX Dual, Altum, Altum-PT, and RedEdge-P. The only exception is the thermal band (LWIR) present in the Altum and Altum-PT, which is stored in centi-Kelvin and requires a separate conversion: `(band_value / 100) - 273.15` to obtain degrees Celsius.
+
+```{r, warning=FALSE}
+
+prepare_raster_clip <- function(
+    raster_path,               # Path to the raster file (.tif)
+    polygon_path,              # Path to shapefile (.shp) or sf object
+    target_crs       = NULL,   # Target EPSG code (e.g. 32723). NULL = use raster CRS
+    micasense        = FALSE,  # TRUE if image was collected with a MicaSense camera
+    auto_detect      = TRUE,   # Auto-detect high DN values and normalize
+    micasense_factor = 32768,  # Normalization factor (MicaSense/Metashape default)
+    force_normalize  = FALSE,  # Bypass safety check and force normalization
+    output_path      = NULL,   # If provided, saves the clipped raster to disk
+    verbose          = TRUE    # Print processing report
+) {
+  
+  # ── Internal logging helpers ───────────────────────────────
+  .log <- function(...) if (verbose) message(...)
+  .sep <- function() if (verbose) message(strrep("-", 62))
+  
+  # ── 1. Load data ───────────────────────────────────────────
+  .sep()
+  .log("  PREPARE_RASTER_CLIP -- Processing Report")
+  .sep()
+  .log("  [1/5] Loading input data...")
+  
+  r <- terra::rast(raster_path)
+  
+  shp <- if (inherits(polygon_path, "sf")) {
+    polygon_path
+  } else {
+    sf::read_sf(polygon_path)
+  }
+  
+  # ── 2. Collect initial metadata ───────────────────────────
+  crs_raster_orig  <- terra::crs(r, describe = TRUE)
+  crs_polygon_orig <- sf::st_crs(shp)
+  
+  res_orig    <- terra::res(r)
+  nbands      <- terra::nlyr(r)
+  band_names  <- names(r)
+  dtype       <- terra::datatype(r)
+  val_range   <- terra::minmax(r)      # matrix: row 1 = min, row 2 = max
+  global_min  <- min(val_range[1, ], na.rm = TRUE)
+  global_max  <- max(val_range[2, ], na.rm = TRUE)
+  
+  epsg_raster_orig  <- crs_raster_orig$code
+  epsg_polygon_orig <- crs_polygon_orig$epsg
+  
+  # ── 3. Define target CRS ──────────────────────────────────
+  .log("  [2/5] Checking coordinate reference systems...")
+  
+  epsg_target <- if (!is.null(target_crs)) target_crs else epsg_raster_orig
+  
+  # Reproject polygon if CRS does not match the target
+  crs_r_wkt   <- terra::crs(r)
+  crs_shp_wkt <- sf::st_crs(shp)$wkt
+  
+  reproj_polygon <- FALSE
+  if (!isTRUE(all.equal(crs_shp_wkt, crs_r_wkt))) {
+    reproj_polygon <- TRUE
+    shp <- sf::st_transform(shp, crs = epsg_target)
+    .log("  [!] Polygon reprojected to EPSG:", epsg_target)
+  } else {
+    .log("  [OK] Polygon CRS is compatible with the raster.")
+  }
+  
+  # Reproject raster if a different target CRS was requested
+  reproj_raster <- FALSE
+  if (!is.null(target_crs) && epsg_raster_orig != as.character(target_crs)) {
+    reproj_raster <- TRUE
+    .log("  [!] Reprojecting raster to EPSG:", target_crs, "(this may take a while)...")
+    r <- terra::project(r, paste0("EPSG:", target_crs))
+    .log("  [OK] Raster successfully reprojected.")
+  }
+  
+  epsg_raster_new <- terra::crs(r, describe = TRUE)$code
+  res_new         <- terra::res(r)
+  
+  # ── 4. Normalization ──────────────────────────────────────
+  .log("  [3/5] Checking normalization requirements...")
+  
+  normalized  <- FALSE
+  norm_reason <- "None"
+  
+  # -- Safety check: detect if values are already in reflectance scale --
+  # Metashape can export two formats:
+  #   (a) Raster Transform: None      -> raw UInt16 integers (0 to ~65535) -> needs / 32768
+  #   (b) Raster Transform: Index Val -> float reflectance (0.0 to ~1.2)   -> already normalized
+  # Dividing an already-normalized image corrupts the data (values collapse to ~0).
+  # force_normalize = TRUE bypasses this check when the user is certain normalization is needed.
+  
+  already_normalized <- (global_max <= 2.0) && (global_min >= 0)
+  
+  if (already_normalized && !force_normalize) {
+    .log("  [OK] Values already in reflectance scale (0.0 to ~1.0). No normalization applied.")
+    if (micasense) {
+      .log("  [WARNING] micasense = TRUE was set, but values appear already normalized.")
+      .log("  [WARNING] Division by", micasense_factor, "was SKIPPED to prevent data corruption.")
+      .log("  [WARNING] To force normalization anyway, set force_normalize = TRUE.")
+    }
+    norm_reason <- "Skipped -- values already in reflectance scale"
+    
+  } else if (micasense || force_normalize) {
+    # User explicitly declared MicaSense camera (or forced normalization).
+    # MicaSense/Metashape stores calibrated reflectance as 16-bit unsigned integers,
+    # where 32768 (= 2^15, midpoint of UInt16) represents 100% reflectance.
+    # Dividing by 32768 recovers the true reflectance scale (0.0 to ~1.2).
+    # Values above 1.0 are valid: highly reflective surfaces (white tarps, water specular
+    # reflection) can exceed the panel reference without corrupting the data.
+    # Applies to: RedEdge, RedEdge-MX, RedEdge-MX Dual, Altum, Altum-PT, RedEdge-P.
+    # Exception: thermal band (LWIR) uses centi-Kelvin -> convert as (value / 100) - 273.15.
+    if (force_normalize && already_normalized) {
+      .log("  [!] force_normalize = TRUE. Overriding safety check.")
+    }
+    .log("  [!] MicaSense camera declared. Applying division by", micasense_factor, "...")
+    r           <- r / micasense_factor
+    normalized  <- TRUE
+    norm_reason <- paste0("MicaSense declared by user (/ ", micasense_factor, ")")
+    
+  } else if (auto_detect) {
+    if (global_max > 1000 && global_max <= 65535) {
+      
+      # Select normalization factor based on observed value range
+      detected_factor <- dplyr::case_when(
+        global_max > 30000 & global_max < 36000  ~ 32768,  # MicaSense/Metashape typical range
+        global_max > 32767 & global_max <= 65535 ~ 65535,  # Full UInt16 range
+        global_max > 1000  & global_max <= 10000 ~ 10000,  # Arbitrary high scale
+        TRUE                                     ~ micasense_factor
+      )
+      
+      .log(sprintf("  [!] High DN values detected (max = %.1f). Applying division by %d...",
+                   global_max, detected_factor))
+      r           <- r / detected_factor
+      normalized  <- TRUE
+      norm_reason <- sprintf("Auto-detected (max = %.1f, / %d)", global_max, detected_factor)
+      
+    } else {
+      .log("  [OK] No normalization needed based on auto-detection.")
+      norm_reason <- "Skipped -- no high DN values detected"
+    }
+    
+  } else {
+    .log("  [OK] Normalization skipped (micasense = FALSE, auto_detect = FALSE).")
+    norm_reason <- "Skipped -- normalization disabled by user"
+  }
+  
+  # ── 5. Clip raster by polygon ─────────────────────────────
+  .log("  [4/5] Clipping raster with polygon boundary...")
+  
+  shp_vect  <- terra::vect(shp)
+  r_clipped <- terra::mask(terra::crop(r, shp_vect), shp_vect)
+  
+  # ── 6. Save to disk (optional) ────────────────────────────
+  if (!is.null(output_path)) {
+    .log("  [5/5] Saving output raster to:", output_path)
+    terra::writeRaster(r_clipped, output_path, overwrite = TRUE, datatype = "FLT4S")
+  } else {
+    .log("  [5/5] Output returned as in-memory SpatRaster (output_path not provided).")
+  }
+  
+  # ── 7. Collect post-processing metadata ───────────────────
+  new_range   <- terra::minmax(r_clipped)
+  clipped_min <- min(new_range[1, ], na.rm = TRUE)
+  clipped_max <- max(new_range[2, ], na.rm = TRUE)
+  
+  # ── 8. Final report ───────────────────────────────────────
+  .sep()
+  .log("  PROCESSING REPORT")
+  .sep()
+  .log(sprintf("  %-32s %s", "Input raster:",
+               basename(raster_path)))
+  .log(sprintf("  %-32s %s", "Input polygon:",
+               basename(if (is.character(polygon_path)) polygon_path else "sf object")))
+  .log("")
+  
+  .log("  -- Pixel Resolution ----------------------------------------")
+  .log(sprintf("  %-32s %.4f x %.4f m",
+               "Original resolution (X x Y):", res_orig[1], res_orig[2]))
+  if (reproj_raster)
+    .log(sprintf("  %-32s %.4f x %.4f m",
+                 "Resolution after reprojection:", res_new[1], res_new[2]))
+  .log("")
+  
+  .log("  -- Coordinate Reference Systems ----------------------------")
+  .log(sprintf("  %-32s EPSG:%-6s (%s)", "Raster CRS (original):",
+               epsg_raster_orig,
+               terra::crs(terra::rast(raster_path), describe = TRUE)$name))
+  .log(sprintf("  %-32s EPSG:%-6s", "Raster CRS (final):",
+               epsg_raster_new))
+  .log(sprintf("  %-32s EPSG:%-6s (%s)", "Polygon CRS (original):",
+               epsg_polygon_orig,
+               crs_polygon_orig$Name))
+  .log(sprintf("  %-32s EPSG:%-6s", "Polygon CRS (final):",
+               sf::st_crs(shp)$epsg))
+  .log("")
+  
+  .log("  -- Bands & Pixel Values ------------------------------------")
+  .log(sprintf("  %-32s %d  (%s)", "Number of bands:",
+               nbands, paste(band_names, collapse = ", ")))
+  .log(sprintf("  %-32s %s", "Data type:",
+               paste(unique(dtype), collapse = ", ")))
+  .log(sprintf("  %-32s %.4f", "Original minimum value:", global_min))
+  .log(sprintf("  %-32s %.4f", "Original maximum value:", global_max))
+  .log("")
+  
+  .log("  -- Normalization -------------------------------------------")
+  .log(sprintf("  %-32s %s", "MicaSense camera:",
+               ifelse(micasense, "YES (declared by user)", "NOT declared")))
+  .log(sprintf("  %-32s %s", "Already normalized (detected):",
+               ifelse(already_normalized, "YES", "NO")))
+  .log(sprintf("  %-32s %s", "Force normalize:",
+               ifelse(force_normalize, "YES", "NO")))
+  .log(sprintf("  %-32s %s", "Normalization applied:",
+               ifelse(normalized, "YES", "NO")))
+  .log(sprintf("  %-32s %s", "Reason:", norm_reason))
+  .log("")
+  
+  .log("  -- Clipped Output ------------------------------------------")
+  .log(sprintf("  %-32s %.4f  to  %.4f", "Value range (clipped):",
+               clipped_min, clipped_max))
+  if (normalized && clipped_max > 1.0)
+    .log("  NOTE: Values above 1.0 are valid -- highly reflective surfaces")
+    .log("  (white tarps, specular water) can exceed the panel reference.")
+  .sep()
+  .log("  [DONE] Processing complete.\n")
+  
+  return(invisible(r_clipped))
+}
+
+
+############### How to use the function ###############
+result <-  prepare_raster_clip(
+  raster_path = "C:/Users/Thiago/Desktop/soil_classification/mica/orto_06_21_24.tif",
+  polygon_path = "C:/Users/Thiago/Desktop/soil_classification/contour_IH_geojson.geojson",
+  target_crs = 32617,
+  micasense =TRUE,
+  auto_detect = TRUE,
+  micasense_factor = 32768,
+  force_normalize = FALSE,
+  output_path = "C:/Users/Thiago/Desktop/soil_classification/mica/06_21_24_new_clip.tif",
+  verbose = TRUE)
+
+# Visualize using FieldView
+polygon = read_sf("C:/Users/Thiago/Desktop/soil_classification/contour_IH_geojson.geojson")
+fieldView(result, polygon)
+```
+
+# 4° Creating the sample for classification
+
+After clip the image, we need to create the random samples for train and test the classification models. Basically, we can create how much samples we need, in my case, I gonna create two class "soil" and "plant". During this step, we need to understand that:
+
+1° - Soil and shadows present distinct reflectance values, and our models will gonna analyze the values. It means that, we can add one more class for shadows, our you can add the shadows like a soil, just to move these values.
+
+2° - Basically we create polygons, and inside each polygon a random number of point is create to extract the values. Thus, the polygon size is truly important for us, since small polygons might not capture the soil variability. It means that, if you have soil with "visual" colors distinct, like sand and clay, you need to create samples in this region.
+
+The parameters st_as_sf create a dataframe with coordinates associated, while the st_sample create the samples and the size the number of samples. Using this function you also has the option to sue NDVI, NDRE or GNDVI instead of the RGB, since you can have a contrast between soil and plants.
+
+```{r}
+
+generate_training_samples <- function(
+    mosaic,                 # SpatRaster object
+    class_names,            # Character vector of class names
+    n_samples    = 400,     # Samples per class: single value or named vector
+    display      = "RGB",   # Display mode: "RGB", "NDVI", "GNDVI", "NDRE"
+    bands        = list(    # Named list mapping band roles to layer indices
+      red      = 1,
+      green    = 2,
+      blue     = 3,
+      nir      = NULL,      # Required for NDVI, GNDVI, NDRE
+      rededge  = NULL,      # Required for NDRE
+      swir     = NULL       # Optional (water stress applications)
+    ),
+    output_path  = NULL,    # Optional: save final file (.gpkg or .shp)
+    verbose      = TRUE,
+    dsample    = 5  # downsamples values: numeric downsample reduction factor.
+) {
+  
+  # ── Internal helpers ───────────────────────────────────────
+  .log <- function(...) if (verbose) message(...)
+  .sep <- function() if (verbose) message(strrep("-", 62))
+  
+  # ── Input validation ──────────────────────────────────────
+  if (!is.character(class_names) || length(class_names) < 2)
+    stop("  [ERROR] 'class_names' must be a character vector with at least 2 classes.")
+  
+  display <- toupper(display)
+  valid_displays <- c("RGB", "NDVI", "GNDVI", "NDRE")
+  if (!display %in% valid_displays)
+    stop(sprintf("  [ERROR] 'display' must be one of: %s",
+                 paste(valid_displays, collapse = ", ")))
+  
+  # Check band requirements per display mode
+  if (display %in% c("NDVI", "GNDVI", "NDRE") && is.null(bands$nir))
+    stop(sprintf("  [ERROR] display = '%s' requires bands$nir to be set.", display))
+  if (display == "NDRE" && is.null(bands$rededge))
+    stop("  [ERROR] display = 'NDRE' requires bands$rededge to be set.")
+  if (display == "NDVI" && is.null(bands$red))
+    stop("  [ERROR] display = 'NDVI' requires bands$red to be set.")
+  if (display == "GNDVI" && is.null(bands$green))
+    stop("  [ERROR] display = 'GNDVI' requires bands$green to be set.")
+  if (display == "RGB" &&
+      (is.null(bands$red) || is.null(bands$green) || is.null(bands$blue)))
+    stop("  [ERROR] display = 'RGB' requires bands$red, bands$green, and bands$blue.")
+  
+  # Normalize n_samples to named vector
+  if (length(n_samples) == 1) {
+    n_samples <- setNames(rep(n_samples, length(class_names)), class_names)
+  } else {
+    if (!all(class_names %in% names(n_samples)))
+      stop("  [ERROR] When 'n_samples' is a vector, all class names must be named.")
+  }
+  
+  n_classes <- length(class_names)
+  
+  # ── Prepare display mosaic ────────────────────────────────
+  # Extract individual bands as single-layer rasters
+  .get_band <- function(idx) terra::subset(mosaic, idx)
+  
+  display_mosaic <- switch(display,
+    
+    "RGB" = {
+      terra::subset(mosaic, c(bands$red, bands$green, bands$blue))
+    },
+    
+    "NDVI" = {
+      nir <- .get_band(bands$nir)
+      red <- .get_band(bands$red)
+      idx <- (nir - red) / (nir + red)
+      names(idx) <- "NDVI"
+      idx
+    },
+    
+    "GNDVI" = {
+      nir   <- .get_band(bands$nir)
+      green <- .get_band(bands$green)
+      idx   <- (nir - green) / (nir + green)
+      names(idx) <- "GNDVI"
+      idx
+    },
+    
+    "NDRE" = {
+      nir     <- .get_band(bands$nir)
+      rededge <- .get_band(bands$rededge)
+      idx     <- (nir - rededge) / (nir + rededge)
+      names(idx) <- "NDRE"
+      idx
+    }
+  )
+  
+  # ── Report header ─────────────────────────────────────────
+  .sep()
+  .log("  GENERATE_TRAINING_SAMPLES")
+  .sep()
+  .log(sprintf("  %-22s %d", "Number of classes:",    n_classes))
+  .log(sprintf("  %-22s %s", "Classes:",
+               paste(class_names, collapse = ", ")))
+  .log(sprintf("  %-22s %s", "Samples per class:",
+               paste(paste0(class_names, "=", n_samples[class_names]),
+                     collapse = ", ")))
+  .log(sprintf("  %-22s %s", "Display mode:",         display))
+  .log("")
+  
+  # ── Band configuration report ────────────────────────────
+  .log("  -- Band Configuration -----------------------------------------")
+  band_roles <- c("red", "green", "blue", "nir", "rededge", "swir")
+  for (role in band_roles) {
+    val <- bands[[role]]
+    if (!is.null(val)) {
+      layer_name <- tryCatch(names(mosaic)[val], error = function(e) "?")
+      .log(sprintf("  %-22s Band %d  (%s)", paste0(toupper(role), ":"), val, layer_name))
+    }
+  }
+  
+  # ── Index range info (for spectral indices) ───────────────
+  if (display != "RGB") {
+    idx_range <- terra::minmax(display_mosaic, compute = TRUE)
+    .log("")
+    .log(sprintf("  %-22s %.4f  to  %.4f",
+                 paste0(display, " range:"),
+                 idx_range[1], idx_range[2]))
+  }
+  .sep()
+  
+  # ── Digitizing loop ───────────────────────────────────────
+  sample_list <- vector("list", length = n_classes)
+  
+  for (i in seq_along(class_names)) {
+    
+    cls  <- class_names[i]
+    npts <- n_samples[[cls]]
+    
+    .log(sprintf("\n  [%d/%d] Class: '%s'  |  Target samples: %d  |  Display: %s",
+                 i, n_classes, cls, npts, display))
+    .log("  >> Draw one or more polygons in the editor window, then close it.")
+    
+    polygons <- fieldView(mosaic = display_mosaic, editor = TRUE, downsample = dsample)
+    
+    if (is.null(polygons) || nrow(polygons) == 0)
+      stop(sprintf("  [ERROR] No polygons digitized for class '%s'. Aborting.", cls))
+    
+    pts       <- sf::st_as_sf(sf::st_sample(polygons, npts))
+    pts$class <- cls
+    
+    sample_list[[i]] <- pts
+    .log(sprintf("  [OK] %d points generated for class '%s'.", nrow(pts), cls))
+  }
+  
+  # ── Combine all classes ───────────────────────────────────
+  .sep()
+  .log("  Combining all classes into a single training dataset...")
+  
+  training_samples        <- do.call(rbind, sample_list)
+  training_samples$class  <- factor(training_samples$class, levels = class_names)
+  
+  # ── Save to disk (optional) ───────────────────────────────
+  if (!is.null(output_path)) {
+    sf::st_write(training_samples, output_path, delete_dsn = TRUE, quiet = TRUE)
+    .log(sprintf("  [OK] File saved to: %s", output_path))
+  }
+  
+  # ── Summary report ────────────────────────────────────────
+  .sep()
+  .log("  SUMMARY")
+  .sep()
+  .log(sprintf("  %-22s %d", "Total samples:", nrow(training_samples)))
+  for (cls in class_names) {
+    n <- sum(training_samples$class == cls)
+    pct <- round(n / nrow(training_samples) * 100, 1)
+    .log(sprintf("  %-22s %d  (%.1f%%)", paste0("  ", cls, ":"), n, pct))
+  }
+  .sep()
+  .log("  [DONE] Training samples ready.\n")
+  
+  return(invisible(training_samples))
+}
+
+######## Running the function ############
+
+training_samples <- generate_training_samples(
+  mosaic      = result,
+  class_names = c("soil", "plants"), #"water_stress"
+  n_samples   = 400, #c(soil = 400, plants = 100)
+  display     = "GNDVI",
+  bands       = list(red = 3, green = 2, blue = 1,
+                     nir = 5, rededge = 4, swir = NULL),
+  output_path = NULL,
+  dsample = 2
+)
+
+#Visualize final result 
+fieldView(result, training_samples)
+
+#Saving the sample
+write_sf(training_samples, "C:/Users/Thiago/Desktop/soil_classification/training_samples.gpkg")
+```
+
+
+# 5° - Running ML models
+
+The next step is train the ML models. In this code, three main ML models can be use: Random Forest (RF), Support Vector Machine (SVM) and Extreme Gradient Boosting (XGBoost). The models are training a fine-tuning step (tune-length), and the cross-validation with K-fold is applied for 0.7 (70%) of train data, the train_partition control the percentage of the data that is use for ML models and the plot_results create a plot with the classification map.
+
+```{r, warning = FALSE}
+
+run_classification_models <- function(
+    raster_data,                          # SpatRaster object
+    training_data,                        # sf or Spatial object with class labels
+    models          = c("rf",             # Models to train (caret names)
+                        "svmRadial",
+                        "xgbTree"),
+    response_col    = "class",            # Column name with class labels
+    tune_length     = 3,                  # Number of hyperparameter combinations
+    kfold           = 5,                  # Number of cross-validation folds
+    train_partition = 0.7,                # Proportion of data for training
+    min_dist        = 0,                  # Minimum distance between train/test points
+    plot_results    = TRUE,               # Plot classified maps and fieldView
+    output_dir      = NULL,               # Optional: directory to save classified maps
+    verbose         = TRUE
+) {
+  
+  # ── Internal helpers ───────────────────────────────────────
+  .log <- function(...) if (verbose) message(...)
+  .sep <- function() if (verbose) message(strrep("-", 62))
+  
+  # ── Input validation ──────────────────────────────────────
+  .sep()
+  .log("  RUN_CLASSIFICATION_MODELS -- Processing Report")
+  .sep()
+  
+  if (!response_col %in% names(training_data))
+    stop(sprintf("  [ERROR] Column '%s' not found in training_data.", response_col))
+  
+  if (length(models) == 0)
+    stop("  [ERROR] 'models' must contain at least one model name.")
+  
+  if (train_partition <= 0 || train_partition >= 1)
+    stop("  [ERROR] 'train_partition' must be between 0 and 1 (e.g. 0.7).")
+  
+  if (!is.null(output_dir) && !dir.exists(output_dir)) {
+    dir.create(output_dir, recursive = TRUE)
+    .log(sprintf("  [!] Output directory created: %s", output_dir))
+  }
+  
+  # ── Prepare inputs ────────────────────────────────────────
+  # Ensure unique band names (required by superClass)
+  names(raster_data) <- make.unique(names(raster_data))
+  
+  # Convert sf to Spatial if needed (RStoolbox requirement)
+  if (inherits(training_data, "sf")) {
+    training_data <- as(training_data, "Spatial")
+  }
+  
+  # Collect metadata for report
+  n_classes  <- length(unique(training_data[[response_col]]))
+  class_lvls <- sort(unique(training_data[[response_col]]))
+  n_total    <- nrow(training_data)
+  n_train    <- round(n_total * train_partition)
+  n_test     <- n_total - n_train
+  n_bands    <- terra::nlyr(raster_data)
+  
+  # ── Pre-run report ────────────────────────────────────────
+  .log(sprintf("  %-26s %s", "Models to train:",
+               paste(models, collapse = ", ")))
+  .log(sprintf("  %-26s %d  (%s)", "Classes:",
+               n_classes, paste(class_lvls, collapse = ", ")))
+  .log(sprintf("  %-26s %d  (train: %d | test: %d)",
+               "Total samples:", n_total, n_train, n_test))
+  .log(sprintf("  %-26s %d",      "Raster bands:",      n_bands))
+  .log(sprintf("  %-26s %d-fold", "Cross-validation:",  kfold))
+  .log(sprintf("  %-26s %d",      "Tune length:",       tune_length))
+  .sep()
+  
+  # ── Training loop ─────────────────────────────────────────
+  results       <- list()
+  metrics_list  <- list()
+  failed_models <- character(0)
+  
+  for (i in seq_along(models)) {
+    
+    mdl <- models[i]
+    .log(sprintf("\n  [%d/%d] Training model: %s ...", i, length(models), mdl))
+    
+    # Wrap in tryCatch so one failure does not abort the others
+    model_result <- tryCatch({
+      
+      RStoolbox::superClass(
+        raster_data,
+        trainData      = training_data,
+        responseCol    = response_col,
+        model          = mdl,
+        tuneLength     = tune_length,
+        kfold          = kfold,
+        trainPartition = train_partition,
+        minDist        = min_dist
+      )
+      
+    }, error = function(e) {
+      .log(sprintf("  [ERROR] Model '%s' failed: %s", mdl, conditionMessage(e)))
+      NULL
+    })
+    
+    # Skip failed models and register failure
+    if (is.null(model_result)) {
+      failed_models <- c(failed_models, mdl)
+      next
+    }
+    
+    .log(sprintf("  [OK] Model '%s' trained successfully.", mdl))
+    
+    # ── Extract metrics ─────────────────────────────────────
+    # validation$performance is a list from caret::confusionMatrix()
+    # accuracy metrics live in $overall (named numeric vector)
+    # per-class metrics live in $byClass (named numeric vector)
+    
+    perf         <- model_result$validation$performance
+    perf_overall <- perf$overall    # named numeric: Accuracy, Kappa, CI...
+    perf_class   <- perf$byClass    # named numeric: Sensitivity, Specificity...
+    
+    # Safety check: warn if expected names are missing
+    required <- c("Accuracy", "Kappa", "AccuracyLower", "AccuracyUpper")
+    missing  <- setdiff(required, names(perf_overall))
+    if (length(missing) > 0) {
+      .log(sprintf("  [WARNING] Missing metrics in $overall for '%s': %s",
+                   mdl, paste(missing, collapse = ", ")))
+      .log(sprintf("  [WARNING] Available: %s",
+                   paste(names(perf_overall), collapse = ", ")))
+    }
+    
+    metrics_list[[mdl]] <- data.frame(
+      model        = mdl,
+      overall_acc  = as.numeric(perf_overall["Accuracy"]),
+      kappa        = as.numeric(perf_overall["Kappa"]),
+      acc_lower    = as.numeric(perf_overall["AccuracyLower"]),
+      acc_upper    = as.numeric(perf_overall["AccuracyUpper"]),
+      sensitivity  = as.numeric(perf_class["Sensitivity"]),
+      specificity  = as.numeric(perf_class["Specificity"]),
+      stringsAsFactors = FALSE
+    )
+    
+    # ── Plot individual results ─────────────────────────────
+    if (plot_results) {
+      plot(model_result$map,
+           main = sprintf("Classified Map -- %s", toupper(mdl)))
+      fieldView(raster_data, model_result$map)
+      .log(sprintf("\n  -- Confusion Matrix: %s --", toupper(mdl)))
+      print(perf$table)
+      .log(sprintf("\n  -- Overall Metrics: %s --", toupper(mdl)))
+      print(round(perf_overall, 4))
+    }
+    
+    # ── Save map to disk ────────────────────────────────────
+    if (!is.null(output_dir)) {
+      out_file <- file.path(output_dir,
+                            sprintf("classified_map_%s.tif", mdl))
+      terra::writeRaster(model_result$map, out_file, overwrite = TRUE)
+      .log(sprintf("  [OK] Map saved: %s", out_file))
+    }
+    
+    results[[mdl]] <- model_result
+  }
+  
+  # ── Comparative accuracy table ────────────────────────────
+  .sep()
+  .log("  ACCURACY COMPARISON")
+  .sep()
+  
+  if (length(metrics_list) > 0) {
+    
+    metrics_df        <- do.call(rbind, metrics_list)
+    metrics_df        <- metrics_df[order(-metrics_df$overall_acc), ]
+    rownames(metrics_df) <- NULL
+    
+    # Print formatted table
+    .log(sprintf("  %-14s  %-10s  %-8s  %-10s  %-10s  %-20s",
+                 "Model", "Accuracy", "Kappa", "Sensitiv.", "Specific.", "95% CI"))
+    .log(sprintf("  %s", strrep(".", 76)))
+    
+    for (j in seq_len(nrow(metrics_df))) {
+      row <- metrics_df[j, ]
+      .log(sprintf("  %-14s  %-10s  %-8s  %-10s  %-10s  [%.4f -- %.4f]",
+                   row$model,
+                   sprintf("%.4f", row$overall_acc),
+                   sprintf("%.4f", row$kappa),
+                   sprintf("%.4f", row$sensitivity),
+                   sprintf("%.4f", row$specificity),
+                   row$acc_lower,
+                   row$acc_upper))
+    }
+    
+    best_model <- metrics_df$model[1]
+    .log(sprintf("\n  Best model (overall accuracy): %s  (%.4f)",
+                 best_model, metrics_df$overall_acc[1]))
+    
+    # Store metrics table inside results for easy access
+    results[["metrics"]] <- metrics_df
+    
+  } else {
+    .log("  [WARNING] No models completed successfully. Metrics table not available.")
+  }
+  
+  # ── Failed models summary ─────────────────────────────────
+  if (length(failed_models) > 0) {
+    .sep()
+    .log("  [WARNING] The following models failed and were skipped:")
+    for (fm in failed_models)
+      .log(sprintf("            -- %s", fm))
+  }
+  
+  # ── Final summary ─────────────────────────────────────────
+  n_completed <- length(results) - as.integer("metrics" %in% names(results))
+  .sep()
+  .log(sprintf("  [DONE] %d/%d models completed successfully.\n",
+               n_completed, length(models)))
+  
+  return(invisible(results))
+}
+
+# Running the models
+
+band_result <- run_classification_models(
+  raster_data     = result,
+  training_data   = training_samples,
+  models          = c("rf", "svmRadial", "xgbTree"),
+  kfold           = 5,
+  train_partition = 0.7,
+  plot_results    = TRUE,
+  output_dir      = NULL
+)
+
+
+
+# Accuracy comparison table (all models, sorted by accuracy)
+band_result$metrics
+
+# Classified map for a specific model
+plot(band_result$rf$map)
+plot(band_result$svmRadial$map)
+plot(band_result$xgbTree$map)
+
+# Full confusion matrix for a specific model
+band_result$rf$validation$performance$table
+
+# Overall metrics for a specific model
+band_result$rf$validation$performance$overall
+
+# Per-class metrics (Sensitivity, Specificity, F1...)
+band_result$rf$validation$performance$byClass
+
+# Visualize best model map alongside original raster
+fieldView(result, band_result$rf$map)
+```
+
+
+# 6° - Metrics and Confusion matrix
+
+During this step we gonna save the main information for trained models. Basically, now we gonna plot the bargraphs and confusion matrix compared the overall models and byclass.
+
+```{r}
+
+plot_classification_results <- function(
+    band_result,     # Output list from run_classification_models()
+    save_dir,        # Directory to save all plots
+    dpi     = 300,   # Resolution for saved figures
+    verbose = TRUE
+) {
+  
+  # ── Internal helpers ───────────────────────────────────────
+  .log <- function(...) if (verbose) message(...)
+  .sep <- function() if (verbose) message(strrep("-", 62))
+  
+  .sep()
+  .log("  PLOT_CLASSIFICATION_RESULTS -- Processing Report")
+  .sep()
+  
+  # ── Validate inputs ───────────────────────────────────────
+  if (!dir.exists(save_dir)) {
+    dir.create(save_dir, recursive = TRUE)
+    .log(sprintf("  [!] Output directory created: %s", save_dir))
+  }
+  
+  # Remove the $metrics slot — keep only actual model results
+  model_keys <- setdiff(names(band_result), "metrics")
+  
+  if (length(model_keys) == 0)
+    stop("  [ERROR] No model results found in band_result.")
+  
+  .log(sprintf("  %-24s %s", "Models found:",
+               paste(model_keys, collapse = ", ")))
+  .log(sprintf("  %-24s %s", "Output directory:", save_dir))
+  .sep()
+  
+  # ── 1. Extract metrics ────────────────────────────────────
+  .log("  [1/4] Extracting metrics from confusion matrices...")
+  
+  overall_rows <- list()
+  byclass_rows <- list()
+  cm_list      <- list()
+  
+  for (mdl in model_keys) {
+    
+    perf <- band_result[[mdl]]$validation$performance
+    ov   <- perf$overall   # named numeric vector: Accuracy, Kappa, CI...
+    tbl  <- perf$table     # confusion matrix table — rownames = class names
+    
+    # -- Overall metrics --------------------------------------
+    overall_rows[[mdl]] <- data.frame(
+      model    = toupper(mdl),
+      metric   = c("Accuracy", "Kappa"),
+      value    = as.numeric(c(ov["Accuracy"],      ov["Kappa"])),
+      ci_lower = as.numeric(c(ov["AccuracyLower"], NA)),
+      ci_upper = as.numeric(c(ov["AccuracyUpper"], NA)),
+      stringsAsFactors = FALSE
+    )
+    
+    # -- Per-class metrics (one-vs-rest from confusion table) -
+    # Always derived from tbl so class names are preserved for
+    # both binary (where caret byClass is a plain named vector
+    # without class separation) and multiclass problems.
+    classes <- rownames(tbl)
+    
+    for (cls in classes) {
+      
+      tp <- tbl[cls, cls]
+      fn <- sum(tbl[cls, ]) - tp    # row sum minus diagonal
+      fp <- sum(tbl[, cls]) - tp    # col sum minus diagonal
+      tn <- sum(tbl) - tp - fn - fp
+      
+      sens    <- tp / (tp + fn)
+      spec    <- tn / (tn + fp)
+      prec    <- ifelse((tp + fp) > 0, tp / (tp + fp), NA)
+      rec     <- sens
+      f1      <- ifelse(!is.na(prec) & (prec + rec) > 0,
+                        2 * prec * rec / (prec + rec), NA)
+      bal_acc <- (sens + spec) / 2
+      
+      met_vals <- c(
+        Sensitivity          = sens,
+        Specificity          = spec,
+        Precision            = prec,
+        F1                   = f1,
+        `Balanced Accuracy`  = bal_acc
+      )
+      
+      for (met in names(met_vals)) {
+        byclass_rows[[paste(mdl, cls, met)]] <- data.frame(
+          model  = toupper(mdl),
+          class  = cls,
+          metric = met,
+          value  = as.numeric(met_vals[[met]]),
+          stringsAsFactors = FALSE
+        )
+      }
+    }
+    
+    cm_list[[mdl]] <- tbl
+    .log(sprintf("  [OK] '%s' -- classes: %s",
+                 toupper(mdl), paste(classes, collapse = ", ")))
+  }
+  
+  overall_df <- do.call(rbind, overall_rows)
+  byclass_df <- do.call(rbind, byclass_rows)
+  rownames(overall_df) <- NULL
+  rownames(byclass_df) <- NULL
+  
+  # ── Shared theme ──────────────────────────────────────────
+  base_theme <- theme_bw(base_size = 12) +
+    theme(
+      plot.title       = element_text(hjust = 0.5, face = "bold", size = 13),
+      axis.title       = element_text(size = 11),
+      axis.text        = element_text(size = 10),
+      legend.title     = element_text(face = "bold", size = 10),
+      legend.text      = element_text(size = 9),
+      strip.text       = element_text(face = "bold", size = 11),
+      panel.grid.minor = element_blank()
+    )
+  
+  model_colors <- setNames(
+    viridis::viridis(length(model_keys), option = "D", end = 0.85),
+    toupper(model_keys)
+  )
+  
+  class_colors <- setNames(
+    viridis::viridis(length(unique(byclass_df$class)), option = "turbo", end = 0.85),
+    unique(byclass_df$class)
+  )
+  
+  # ── 2. Confusion matrices ─────────────────────────────────
+  .log("  [2/4] Plotting confusion matrices...")
+  
+  cm_plots <- list()
+  
+  for (mdl in model_keys) {
+    
+    cm_df <- as.data.frame(as.table(cm_list[[mdl]]))
+    colnames(cm_df) <- c("Predicted", "Reference", "Count")
+    
+    # Row-wise percentage (proportion of true class total)
+    totals    <- aggregate(Count ~ Reference, data = cm_df, FUN = sum)
+    cm_df     <- merge(cm_df, totals, by = "Reference", suffixes = c("", "_total"))
+    cm_df$pct <- cm_df$Count / cm_df$Count_total * 100
+    
+    cm_plots[[mdl]] <- ggplot(cm_df,
+        aes(x = Reference, y = Predicted, fill = Count)) +
+      geom_tile(color = "white", linewidth = 1.2) +
+      geom_text(aes(label = sprintf("%d\n(%.1f%%)", Count, pct)),
+                size = 4, fontface = "bold", color = "white") +
+      scale_fill_viridis_c(option = "D", direction = -1, name = "Count") +
+      labs(
+        title = sprintf("Confusion Matrix -- %s", toupper(mdl)),
+        x     = "True Class",
+        y     = "Predicted Class"
+      ) +
+      coord_equal() +
+      base_theme +
+      theme(legend.position = "right")
+  }
+  
+  combined_cm <- wrap_plots(cm_plots, nrow = 1)
+  
+  cm_path <- file.path(save_dir, "confusion_matrices.png")
+  ggsave(cm_path, combined_cm,
+         width  = 5.5 * length(model_keys),
+         height = 5.5,
+         dpi    = dpi)
+  .log("  [OK] Confusion matrices saved.")
+  
+  # ── 3. Overall metrics ────────────────────────────────────
+  .log("  [3/4] Plotting overall metrics...")
+  
+  overall_plot <- ggplot(overall_df,
+      aes(x = model, y = value, fill = model)) +
+    geom_col(width = 0.65, color = "black", linewidth = 0.3) +
+    geom_errorbar(
+      data = overall_df[!is.na(overall_df$ci_lower), ],
+      aes(ymin = ci_lower, ymax = ci_upper),
+      width = 0.18, linewidth = 0.7
+    ) +
+    geom_text(aes(label = sprintf("%.4f", value)),
+              vjust = -0.55, size = 3.5, fontface = "bold") +
+    scale_fill_manual(values = model_colors) +
+    scale_y_continuous(
+      limits = c(0, 1.12),
+      breaks = seq(0, 1, 0.2),
+      labels = scales::percent_format(accuracy = 1)
+    ) +
+    facet_wrap(~ metric, scales = "free_y") +
+    labs(
+      title = "Overall Model Performance",
+      x     = NULL,
+      y     = "Value",
+      fill  = "Model"
+    ) +
+    base_theme +
+    theme(legend.position = "none")
+  
+  overall_path <- file.path(save_dir, "overall_metrics.png")
+  ggsave(overall_path, overall_plot,
+         width  = 4 * length(unique(overall_df$metric)),
+         height = 5,
+         dpi    = dpi)
+  .log("  [OK] Overall metrics plot saved.")
+  
+  # ── 4. Per-class metrics ──────────────────────────────────
+  .log("  [4/4] Plotting per-class metrics...")
+  
+  byclass_clean <- byclass_df[!is.na(byclass_df$value), ]
+  
+  # Fix factor order so facets appear in a consistent sequence
+  metric_order          <- c("Sensitivity", "Specificity", "Precision",
+                              "F1", "Balanced Accuracy")
+  byclass_clean$metric  <- factor(byclass_clean$metric, levels = metric_order)
+  
+  byclass_plot <- ggplot(byclass_clean,
+      aes(x = model, y = value, fill = class)) +
+    geom_col(position = position_dodge(width = 0.75),
+             width = 0.7, color = "black", linewidth = 0.3) +
+    geom_text(aes(label = sprintf("%.3f", value)),
+              position = position_dodge(width = 0.75),
+              vjust = -0.55, size = 3, fontface = "bold") +
+    scale_fill_manual(values = class_colors, name = "Class") +
+    scale_y_continuous(
+      limits = c(0, 1.12),
+      breaks = seq(0, 1, 0.2),
+      labels = scales::percent_format(accuracy = 1)
+    ) +
+    facet_wrap(~ metric, nrow = 2) +
+    labs(
+      title = "Per-Class Model Performance",
+      x     = "Model",
+      y     = "Value",
+      fill  = "Class"
+    ) +
+    base_theme +
+    theme(legend.position = "bottom")
+  
+  n_metrics    <- length(unique(byclass_clean$metric))
+  byclass_path <- file.path(save_dir, "byclass_metrics.png")
+  ggsave(byclass_path, byclass_plot,
+         width  = max(10, 3.5 * ceiling(n_metrics / 2)),
+         height = 10,
+         dpi    = dpi)
+  .log("  [OK] Per-class metrics plot saved.")
+  
+  # ── Summary report ────────────────────────────────────────
+  .sep()
+  .log("  SUMMARY")
+  .sep()
+  .log(sprintf("  %-30s %s", "Models evaluated:",
+               paste(toupper(model_keys), collapse = ", ")))
+  .log(sprintf("  %-30s %s", "Classes found:",
+               paste(unique(byclass_df$class), collapse = ", ")))
+  .log("")
+  .log("  -- Overall Accuracy ------------------------------------------")
+  acc_rows <- overall_df[overall_df$metric == "Accuracy", ]
+  acc_rows <- acc_rows[order(-acc_rows$value), ]
+  for (i in seq_len(nrow(acc_rows))) {
+    .log(sprintf("  %-14s %.4f  [%.4f -- %.4f]",
+                 acc_rows$model[i],
+                 acc_rows$value[i],
+                 acc_rows$ci_lower[i],
+                 acc_rows$ci_upper[i]))
+  }
+  .log("")
+  .log("  -- Files saved -----------------------------------------------")
+  .log("  confusion_matrices.png")
+  .log("  overall_metrics.png")
+  .log("  byclass_metrics.png")
+  .sep()
+  .log(sprintf("  [DONE] All plots saved to: %s\n", save_dir))
+  
+  return(invisible(list(
+    overall_df       = overall_df,
+    byclass_df       = byclass_df,
+    overall_plot     = overall_plot,
+    byclass_plot     = byclass_plot,
+    confusion_matrix = combined_cm
+  )))
+}
+
+metrics_output <- plot_classification_results(
+  band_result = band_result,
+  save_dir    = "C:/Users/Thiago/Desktop/soil_classification/mica/save_test",
+  dpi         = 600
+)
+
+#Access plots interactively 
+metrics_output$overall_plot
+metrics_output$byclass_plot
+metrics_output$confusion_matrix
+
+#Access data tables 
+metrics_output$overall_df
+metrics_output$byclass_df
+
+```
+
+# 7° - Removing the soil background
+
+Since now we already have the best model, we can "remove" the soil from our image. Please, following the next steps.
+
+```{r}
+#1°) creating a mask and remove the soil
+soilmask = band_result$rf$map == 1
+ortosolo = mask(result, soilmask, maskvalue = 0)
+
+
+#2°) Saving the classify orto
+writeRaster(ortosolo, "C:/Users/Thiago/Desktop/soil_classification/mica/save_test/06_21_removed.tif", overwrite = TRUE)
+
+# 3°) Using the mapView to visualize the plots
+m1 <- mapview(raster::raster(result[[1]]),
+              layer.name = "Original",
+              col.regions = gray.colors(100),
+              maxpixels = 7009735)
+
+m2 <- mapview(raster::raster(ortosolo),
+              layer.name = "Classified (RF)",
+              maxpixels = 7009735)
+
+# Opens two synchronized maps in the Viewer panel
+sync(m1, m2)
+```
+
+# 8° - Call the plots and create the buffer
+
+The next step is call the plots. Basically, since you're extracting the soil from MS images, we also want (probably) calculate few vegetation index to compare your treatment. Thus, using this function you can call the treatments, pass the correct crs and define the buffer size that you want to apply. In my case, I don't want to the plots overlap each other, so what I can do is use a negative buffer to decrease the influence of each one.
+
+```{r}
+plots_buffer <- function(file,
+                         based   = ortosolo,
+                         crs     = 32617,
+                         buffer_value = -1,
+                         view    = TRUE) {
+  
+  plt <- st_read(file)
+  plt <- st_transform(x = plt, crs = crs)
+  plt <- st_buffer(x = plt, dist = buffer_value)  # fixed
+  
+  if (view == TRUE) {
+    # print() forces the widget to render inside a function
+    print(fieldView(based, fieldShape = plt, type = 2, alpha_grid = 0.2))
+  } else {
+    print(plot(plt))
+  }
+  
+  return(invisible(plt))  # always return the sf object for downstream use
+}
+
+trts <- plots_buffer(file = "C:/Users/Thiago/Desktop/soil_classification/IH_plots_USDA_NxB_geojson.geojson",
+                     based = ortosolo,
+                     crs = 32617,
+                     buffer_value = -0.2,
+                     view = F)
+
+```
+
+
+# 9° -  Calculate the vegetation index
+
+The vegetation index calculation is one of the most important step to obtained accurated data. Basically, there are three ways/packages that you can use to calculate:
+
+1° - Pliman package (https://tiagoolivoto.github.io/pliman/articles/indexes.html)
+
+2° - FieldImageR package (https://github.com/OpenDroneMap/FIELDimageR)
+
+3° - RStoolbox package (https://bleutner.github.io/RStoolbox/)
+
+Pliman and RStoolbox already have more than 30 vegetation index already configurated, while FieldImageR alomst 20 vegetation index have been catalog. Thus, in our study we gonna use the Pliman since the package have a lot of vegetation index, and you don't need to create new functions.
+
+OBS: operations to calculate vegetation index use a lot RAM memory, thus if you have a PC with 8GB must be better calculate few indexes, maximum of 10.
+
+```{r}
+#Running the mosaic index function
+
+vi_calculation <- mosaic_index(
+  mosaic = ortosolo,
+  r = 3, 
+  g = 2, 
+  b = 1, 
+  re = 4, 
+  nir = 5,
+  index = c("R","G", "NDVI", "NDRE", "GNDVI", 
+            "NGRDI", "RVI", "SAVI", 
+            "TSAVI", "TVI", "CVI", 
+            "CIG","BAI", "OSAVI", 
+            "MSR", "NLI", "GOSAVI",
+            "RDVI", "TDVI", "ARI", "MSAVI", "VIG", 
+            "MSR", "WDRVI"))
+
+```
+
+# 10° - extract the mean values and save
+
+```{r}
+#extract the values using the mean
+stats <- cbind(
+  st_drop_geometry(trts),
+  exact_extract(vi_calculation, trts, fun = "median")) %>%
+  rename_with(~ gsub("median\\.", "", .x))
+
+#if you want to save the csv file 
+writexl::write_xlsx(stats, "C:/Users/Thiago/Desktop/soil_classification/06_21_2024.xlsx")
+```
