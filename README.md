@@ -23,16 +23,16 @@ Below is the step-by-step sequence of the course, guiding you through the proces
 
 
 ## Pay attention
-The code was write under Rstudio using the Rmarkdown and R version 4.4.3
+The code was written in Rstudio using the Rmarkdown and R version 4.4.3
 Before starting to use the code make sure you have the Rtools ---> https://cran.r-project.org/bin/windows/Rtools/rtools43/rtools.html
 You need to download the same version used for R, i.e. in my case since I'm using the R 4.4.3 I needed to download the Rtools 4.3.
 
 ## Observation
 The code has extra comments about the operations and functions used. However in some cases the functions can be confuse. For example:
-  * 1 if you are working on Pix4D software you gonna have the multispectral bands separate, thus you can import each one and join the bands in Rstudio.
+  * 1 if you are working on Pix4D software the multispectral bands will be stored separately, thus you can import each one and join the bands in Rstudio.
   * 2 Creating samples is wide tool and you can create more samples than "soil" and "plants"
   * 3 Running ML models accept only three models SVM, XGB and RF or you can Run only one model
-  * 4 When you call your plots or treatments, previous prepared in QGIS (for example), you need to check the coordinates system and also transform the ortosolo (soil background removed ortomosaic). Nevertheless, if you processed the images using the metashape you must know you need to transform the 16bit values for 0 - 1 normalized values for reflectance, otherwise your VI showed wired values. Look at the metashape tutorial ---> https://agisoft.freshdesk.com/support/solutions/articles/31000148780-micasense-rededge-mx-processing-workflow-including-reflectance-calibration-in-agisoft-metashape-pro
+  * 4 When you call your plots or treatments, previous prepared in QGIS (for example), you need to check the coordinates system and also transform the ortosolo (soil background removed ortomosaic). Nevertheless, if you processed the images using the metashape you must know you need to transform the 16bit values for 0 - 1 normalized values for reflectance, otherwise your vegetation indices will show unexpected values. Look at the metashape tutorial ---> https://agisoft.freshdesk.com/support/solutions/articles/31000148780-micasense-rededge-mx-processing-workflow-including-reflectance-calibration-in-agisoft-metashape-pro
 
 
 ## Vegetation index (VI) using
@@ -67,11 +67,17 @@ Course Schedule: Check the course schedule for detailed topics and script links.
 
 Start exploring the scripts in the repository and follow the workflow above to master drone image processing! 🌟
 
+![R](https://img.shields.io/badge/R-4.4.3-blue)
+![License](https://img.shields.io/badge/license-MIT-green)
+![Status](https://img.shields.io/badge/status-active-brightgreen)
+
 ## Follow us in the Social Media
 
 ### Exension and Research Group in Digital Agriculture (GEPAD), Federal University of Lavras, UFLA, Agriculture Department (DAG)
 
 ![new](https://github.com/user-attachments/assets/677dca36-9e3b-45a6-a039-ab5680e82ccb)
 ![GEPAD](https://github.com/user-attachments/assets/e52c1135-52aa-4cb1-8dfe-0709b256720c)
+
+
 
 
